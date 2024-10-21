@@ -1,0 +1,162 @@
+---
+- name: Ensure network connectivity
+  block:
+    - name: Check if google.com is reachable
+      shell: ping -c 1 google.com
+      register: ping_result
+      ignore_errors: yes
+    - name: Prepend nameserver
+      lineinfile:
+        path: /etc/resolv.conf
+        line: "nameserver 10.202.10.102"
+        insertbefore: nameserver
+        state: present
+      when: ping_result.failed
+    - name: apt update
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+- name: Configure DNS for Baremetal
+  block:
+    - name: Passwordless
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: '^%{{ ansible_user }} ALL=\(ALL\) NOPASSWD: ALL'
+        line: '{{ ansible_user }} ALL=(ALL) NOPASSWD: ALL'
+        validate: 'visudo -cf %s'
+
+    - name: DNS tahrim Baremetal
+      ansible.builtin.replace:
+        path: /etc/netplan/00-installer-config.yaml
+        regexp: '^\s*addresses: \[\]'
+        replace: '        addresses: [ 10.202.10.102, 178.22.122.100, 1.1.1.1 ]'
+    - name: Adding VPN as Gateway
+      ansible.builtin.replace:
+        path: /etc/netplan/00-installer-config.yaml
+        regexp: '^\s*via: .*' #Replacing whole line containing via
+        replace: '        via: 192.168.100.136'
+      when: VPN_gateway
+    - name: netplan check and apply
+      block:
+        - name: Apply netplan
+          shell: netplan apply
+          register: netplan_result  # Capture the result in this variable
+        - name: check netplan
+          fail:
+            msg: "Netplan apply failed: {{ netplan_result.stderr }}"
+          when: netplan_result.rc != 0
+  when: inventory_hostname in groups["baremetal"]
+
+- name: Configure DNS for cloud
+  block:
+    - name: DNS tahrim cloud
+      blockinfile:
+        path: /etc/netplan/50-cloud-init.yaml
+        marker: "            # {mark} DNS"
+        insertafter: EOF
+        state: present
+        block: |
+          {% filter indent(width=12, first=true) %}
+          nameservers:
+            addresses:
+              - 10.202.10.102
+              - 178.22.122.100
+            search: []{% endfilter %}
+    
+    - name: Adding VPN as Gateway
+      blockinfile:
+        path: /etc/netplan/50-cloud-init.yaml
+        insertafter: EOF
+        marker: "            # {mark} gateway"
+        state: present
+        block: |
+          {% filter indent(width=6, first=true) %}
+                routes:
+                  - to: 0.0.0.0/0
+                    via: 20.10.10.100{% endfilter %}
+      when: VPN_gateway
+    - name: netplan check and apply
+      block:
+        - name: Apply netplan
+          shell: netplan apply
+          register: netplan_result  # Capture the result in this variable
+        - name: check netplan
+          fail:
+            msg: "Netplan apply failed: {{ netplan_result.stderr }}"
+          when: netplan_result.rc != 0
+  when: inventory_hostname in groups["cloud"]
+
+- name: install and Configure mirrors for docker
+  block:
+    - name: install Docker and Compose
+      shell: |
+        curl -fsSL https://get.docker.com -o install-docker.sh
+        bash install-docker.sh
+        sleep 5
+        chmod 666 /var/run/docker.sock
+        rm install-docker.sh
+    - name: Create or update Docker daemon.json to configure mirrors and DNS
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "insecure-registries" : ["20.10.10.100:9494", "192.168.100.136:9494"],
+            "registry-mirrors": [
+              "http://20.10.10.100:9494",
+              "http://192.168.100.136:9494",
+              "https://registry.docker.ir",
+              "https://docker.DockerMe.ir/"
+            ],
+            "dns": ["8.8.8.8", "10.202.10.102", "8.8.4.4"]
+          }
+        mode: '0644'
+    - name: Logout of Docker to reset credentials
+      shell: docker logout
+    - name: Restart Docker service
+      systemd:
+        name: docker
+        state: restarted
+        enabled: yes
+  when: Docker_Compose
+
+# - name: Install tools
+#   apt:
+#     name: "{{ item }}"
+#     state: present
+#   with_items: "{{ packages }}"
+#   tags: install_packages
+
+# - name: ensure nginx is at the latest version
+#   apt: name=nginx state=latest
+#   tags: install_nginx
+
+# - name: delete default nginx site
+#   file:
+#     path: /etc/nginx/sites-enabled/default
+#     state: absent
+#   notify: restart nginx
+#   tags: configure_nginx
+
+# - name: copy nginx site.conf
+#   template:
+#     src: site.conf.j2
+#     dest: /etc/nginx/conf.d/{{ domain }}.conf
+#     owner: root
+#     group: root
+#     mode: '0644'
+#   notify: restart nginx
+#   tags: configure_nginx
+
+# - name: start nginx
+#   service:
+#     name: nginx
+#     state: started
+#   tags: configure_nginx
+
+- name: apt update
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  tags: apt_update

@@ -1,0 +1,14 @@
+---
+- hosts: test1
+  become: true
+  gather_facts: no
+  name: Add DNS to netplan (optional installation of VPN Gateway & Docker)
+  ############################################################################
+  ################### ALWAYS CHECK VARS ######################################
+  ############################################################################
+  vars:
+    - VPN_gateway: false
+    - Docker_Compose: true
+  roles:
+  # install and configure nginx service
+    - { role: dns, tags: tahrim }
